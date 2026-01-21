@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Environment variables
+.env
+.env.local
+
+# Excel files (may contain sensitive data)
+*.xlsx
+*.xls
+
+# CSV files (may contain sensitive data)
+*.csv
+
+# Database backups
+*_backup.csv
+*_backup.sql
+
+# Generated SQL files
+*.sql
+
+# Validation reports
+*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
