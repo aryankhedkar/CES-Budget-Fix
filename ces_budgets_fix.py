@@ -536,16 +536,24 @@ def execute_in_batches(
                     cur.execute("DELETE FROM site_budgets WHERE site_id = %s", (site_id,))
                     stats['total_rows_deleted'] += cur.rowcount
                     
-                    # Insert new
-                    for budget in all_budgets:
-                        cur.execute(
+                    # Insert new using bulk insert (much faster)
+                    if all_budgets:
+                        insert_data = [
+                            (site_id, budget['year'], budget['month'], budget['generation'], budget['revenue'])
+                            for budget in all_budgets
+                        ]
+                        cur.executemany(
                             """INSERT INTO site_budgets (site_id, year, month, generation, revenue)
                                VALUES (%s, %s, %s, %s, %s)""",
-                            (site_id, budget['year'], budget['month'], budget['generation'], budget['revenue'])
+                            insert_data
                         )
-                        stats['total_rows_inserted'] += 1
+                        stats['total_rows_inserted'] += len(all_budgets)
                     
                     stats['sites_processed'] += 1
+                    
+                    # Progress indicator for large batches
+                    if stats['sites_processed'] % 10 == 0:
+                        print(f"      Processed {stats['sites_processed']} sites...")
                 
                 conn.commit()
                 successful_batches += 1
