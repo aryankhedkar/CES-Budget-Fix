@@ -103,7 +103,7 @@ def validate_monthly_profile():
 def read_excel_data(filepath: str) -> Dict[str, dict]:
     """
     Read site data from the CES Excel file.
-    Returns dict: {sto_number: {commission_date, annual_generation}}
+    Returns dict: {sto_number: {commission_date, annual_generation, ppa_rate}}
     """
     print(f"\nReading Excel file: {filepath}")
     
@@ -134,6 +134,7 @@ def read_excel_data(filepath: str) -> Dict[str, dict]:
         
         commission_date = row[6]  # Install Commission Date (col G)
         annual_generation = row[18]  # generation (col S)
+        ppa_rate = row[41]  # PPA Rate (col AP)
         
         if not annual_generation or annual_generation == 0:
             rows_skipped_no_generation += 1
@@ -148,7 +149,8 @@ def read_excel_data(filepath: str) -> Dict[str, dict]:
             sites_data[sto_number] = {
                 'sto_number': str(sto_number),
                 'commission_date': str(commission_date) if commission_date else None,
-                'annual_generation': float(annual_generation) if annual_generation else 0.0
+                'annual_generation': float(annual_generation) if annual_generation else 0.0,
+                'ppa_rate': float(ppa_rate) if ppa_rate else 0.0
             }
     
     print(f"  Rows processed: {rows_processed}")
@@ -253,7 +255,8 @@ def match_sites(
                 'site_id': db_sites[sto_number],
                 'site_name': sto_number,
                 'commission_date': data['commission_date'],
-                'annual_generation': data['annual_generation']
+                'annual_generation': data['annual_generation'],
+                'ppa_rate': data.get('ppa_rate', 0.0)
             })
         else:
             sites_in_excel_not_db.append(sto_number)
@@ -284,22 +287,25 @@ def calculate_all_yearly_budgets(
     year1_monthly: Dict[int, float], 
     commissioning_year: int,
     num_years: int = 25,
-    degradation_rate: float = DEGRADATION_RATE
+    degradation_rate: float = DEGRADATION_RATE,
+    ppa_rate: float = 0.0
 ) -> List[dict]:
     """
     Calculate budgets for all years applying degradation.
     
     Year 1 (commissioning year) uses the base monthly values (no degradation).
     Years 2+ apply degradation to the Year 1 values.
+    Revenue is calculated as: generation × PPA rate
     
     Args:
         year1_monthly: Dict of month -> generation for Year 1 (commissioning year budget)
         commissioning_year: The year the site was commissioned
         num_years: Number of years to generate (default 25)
         degradation_rate: Annual degradation rate (default 0.4%)
+        ppa_rate: PPA rate for revenue calculation (default 0.0, will set revenue to NULL)
     
     Returns:
-        List of dicts with {year, month, generation}
+        List of dicts with {year, month, generation, revenue}
     """
     budgets = []
     
@@ -319,10 +325,14 @@ def calculate_all_yearly_budgets(
             degradation_factor = (1 - degradation_rate) ** year_offset
         
         for month, base_generation in year1_monthly.items():
+            generation = round(base_generation * degradation_factor, 2)
+            # Revenue = Generation × PPA Rate
+            revenue = round(generation * ppa_rate, 2) if ppa_rate > 0 else None
             budgets.append({
                 'year': actual_year,
                 'month': month,
-                'generation': round(base_generation * degradation_factor, 2)
+                'generation': generation,
+                'revenue': revenue
             })
     
     return budgets
@@ -413,7 +423,8 @@ def generate_sql_statements(
         
         # Calculate budgets
         year1_monthly = calculate_year1_monthly_budgets(annual_generation)
-        all_budgets = calculate_all_yearly_budgets(year1_monthly, commissioning_year, num_years)
+        ppa_rate = site.get('ppa_rate', 0.0)
+        all_budgets = calculate_all_yearly_budgets(year1_monthly, commissioning_year, num_years, DEGRADATION_RATE, ppa_rate)
         
         sql_lines.append(f"-- Site: {site_name}")
         sql_lines.append(f"-- Site ID: {site_id}")
@@ -427,13 +438,14 @@ def generate_sql_statements(
         sql_lines.append("")
         
         # Insert new budgets
-        sql_lines.append(f"INSERT INTO site_budgets (site_id, year, month, generation)")
+        sql_lines.append(f"INSERT INTO site_budgets (site_id, year, month, generation, revenue)")
         sql_lines.append("VALUES")
         
         values = []
         for budget in all_budgets:
+            revenue_value = budget['revenue'] if budget['revenue'] is not None else 'NULL'
             values.append(
-                f"  ('{site_id}', {budget['year']}, {budget['month']}, {budget['generation']})"
+                f"  ('{site_id}', {budget['year']}, {budget['month']}, {budget['generation']}, {revenue_value})"
             )
         
         sql_lines.append(',\n'.join(values) + ';')
@@ -517,7 +529,8 @@ def execute_in_batches(
                     
                     # Calculate budgets
                     year1_monthly = calculate_year1_monthly_budgets(annual_generation)
-                    all_budgets = calculate_all_yearly_budgets(year1_monthly, commissioning_year, num_years)
+                    ppa_rate = site.get('ppa_rate', 0.0)
+                    all_budgets = calculate_all_yearly_budgets(year1_monthly, commissioning_year, num_years, DEGRADATION_RATE, ppa_rate)
                     
                     # Delete existing
                     cur.execute("DELETE FROM site_budgets WHERE site_id = %s", (site_id,))
@@ -526,9 +539,9 @@ def execute_in_batches(
                     # Insert new
                     for budget in all_budgets:
                         cur.execute(
-                            """INSERT INTO site_budgets (site_id, year, month, generation)
-                               VALUES (%s, %s, %s, %s)""",
-                            (site_id, budget['year'], budget['month'], budget['generation'])
+                            """INSERT INTO site_budgets (site_id, year, month, generation, revenue)
+                               VALUES (%s, %s, %s, %s, %s)""",
+                            (site_id, budget['year'], budget['month'], budget['generation'], budget['revenue'])
                         )
                         stats['total_rows_inserted'] += 1
                     
